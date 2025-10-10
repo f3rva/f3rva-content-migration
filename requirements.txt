@@ -1,0 +1,11 @@
+# F3RVA Content Migration Dependencies
+# 
+# Core dependencies for the content migration library
+# Install with: pip install -r requirements.txt
+
+# CLI framework
+click>=8.0
+
+# Development dependencies (optional)
+# Install with: pip install -r requirements.txt[dev]
+# Or: pip install pytest pytest-cov black isort flake8
