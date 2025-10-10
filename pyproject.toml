@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "f3rva-content-migration"
+version = "0.1.0"
+description = "Python script library for utility functions that are used to migrate content from wordpress to a structured database."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "F3 RVA", email = "info@f3rva.com"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "isort",
+    "flake8",
+]
+
+[project.urls]
+Homepage = "https://github.com/f3rva/f3rva-content-migration"
+Repository = "https://github.com/f3rva/f3rva-content-migration"
+Issues = "https://github.com/f3rva/f3rva-content-migration/issues"
+
+[project.scripts]
+f3rva-migrate = "f3rva_content_migration.cli:main"
+hello-world = "f3rva_content_migration.scripts.hello_world:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --cov=f3rva_content_migration"
