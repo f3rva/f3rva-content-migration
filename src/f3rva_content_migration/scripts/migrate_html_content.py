@@ -3,6 +3,7 @@ import mysql.connector
 import requests
 import time
 import os
+import json
 
 @click.command("migrate-html")
 @click.option('--db-host', default='localhost', help='Database host.')
@@ -10,90 +11,132 @@ import os
 @click.option('--db-password', required=True, help='Database password.')
 @click.option('--db-name', required=True, help='Database name.')
 @click.option('--wp-host', required=True, help='WordPress host.')
-def migrate_html(db_host, db_user, db_password, db_name, wp_host):
+@click.option('--date-cutoff', required=True, help='Cutoff date for workouts (YYYY-MM-DD).')
+def migrate_html(db_host, db_user, db_password, db_name, wp_host, date_cutoff):
     """
     Migrates missing author and HTML content from a WordPress API to the database.
     """
     click.echo("Starting migration of HTML content...")
+    records_file = 'records_to_process.json'
 
+    # Step 1: Query for records and save to a file
     try:
-        # Connect to the database
+        click.echo("Step 1: Querying for records with missing author or HTML content...")
         db_connection = mysql.connector.connect(
-            host=db_host,
-            user=db_user,
-            password=db_password,
-            database=db_name
+            host=db_host, user=db_user, password=db_password, database=db_name
         )
         cursor = db_connection.cursor(dictionary=True)
 
-        # Step 1: Query for records with missing information
-        click.echo("Step 1: Querying for records with missing author or HTML content...")
         query = """
             SELECT w.WORKOUT_ID, w.TITLE, w.SLUG, w.WORKOUT_DATE, w.BACKBLAST_URL
             FROM WORKOUT w
             LEFT JOIN WORKOUT_DETAILS wd ON w.WORKOUT_ID = wd.WORKOUT_ID
-            WHERE w.AUTHOR IS NULL OR wd.HTML_CONTENT IS NULL OR wd.HTML_CONTENT = ''
+            WHERE (w.AUTHOR IS NULL OR wd.HTML_CONTENT IS NULL OR wd.HTML_CONTENT = '')
+            AND w.WORKOUT_DATE < '{}';
         """
-        cursor.execute(query)
+        cursor.execute(query.format(date_cutoff))
         records_to_process = cursor.fetchall()
         click.echo(f"Found {len(records_to_process)} records to process.")
 
-        # Offline storage for records not found or with errors
-        error_records = []
-        not_found_records = []
-
-        # Step 2: Call WordPress API for each record
-        click.echo("Step 2: Fetching data from WordPress API...")
+        # Convert date objects to strings for JSON serialization
         for record in records_to_process:
-            workout_id = record['WORKOUT_ID']
-            slug = record['SLUG']
-            workout_date = record['WORKOUT_DATE'].strftime('%Y-%m-%d')
-            
-            if not slug or not workout_date:
-                click.echo(f"Skipping WORKOUT_ID {workout_id} due to missing slug or workout_date.")
-                continue
+            if record.get('WORKOUT_DATE'):
+                record['WORKOUT_DATE'] = record['WORKOUT_DATE'].isoformat()
 
-            api_url = f"{wp_host}/wp-json/f3-data/v1/workout-slug-date/{slug}/{workout_date}"
-            
-            try:
-                response = requests.get(api_url)
-                response.raise_for_status()  # Raise an exception for bad status codes
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data and data.get('author_name') and data.get('html_content'):
-                        # Step 3: Update database
-                        update_author(cursor, workout_id, data['author_name'])
-                        insert_html_content(cursor, workout_id, data['html_content'])
-                        db_connection.commit()
-                        click.echo(f"Successfully updated WORKOUT_ID {workout_id}")
-                    else:
-                        not_found_records.append(record)
-                        click.echo(f"No data returned from API for WORKOUT_ID {workout_id}")
-
-                else:
-                    not_found_records.append(record)
-                    click.echo(f"API returned status {response.status_code} for WORKOUT_ID {workout_id}")
-
-            except requests.exceptions.RequestException as e:
-                error_records.append({'record': record, 'error': str(e)})
-                click.echo(f"Error fetching data for WORKOUT_ID {workout_id}: {e}")
-
-            # Wait between API calls
-            time.sleep(5)
-
-        # Save error/not found records
-        save_offline(error_records, 'error_records.txt')
-        save_offline(not_found_records, 'not_found_records.txt')
-
-        cursor.close()
-        db_connection.close()
-        click.echo("Migration finished.")
+        with open(records_file, 'w') as f:
+            json.dump(records_to_process, f, indent=4)
+        click.echo(f"Saved {len(records_to_process)} records to {records_file}")
 
     except mysql.connector.Error as err:
-        click.echo(f"Database error: {err}", err=True)
-    except Exception as e:
-        click.echo(f"An unexpected error occurred: {e}", err=True)
+        click.echo(f"Database query error: {err}", err=True)
+        return
+    finally:
+        if 'db_connection' in locals() and db_connection.is_connected():
+            cursor.close()
+            db_connection.close()
+            click.echo("Database connection closed.")
+
+    # Step 2: Process records from the file
+    click.echo("Step 2: Fetching data from WordPress API using the records file...")
+    try:
+        with open(records_file, 'r') as f:
+            records_to_process = json.load(f)
+    except FileNotFoundError:
+        click.echo(f"Error: {records_file} not found. Please run the query step first.", err=True)
+        return
+    
+    updates_to_apply = []
+    error_records = []
+    not_found_records = []
+
+    for record in records_to_process:
+        workout_id = record['WORKOUT_ID']
+        slug = record['SLUG']
+        workout_date = record['WORKOUT_DATE']
+
+        if not slug or not workout_date:
+            click.echo(f"Skipping WORKOUT_ID {workout_id} due to missing slug or workout_date.")
+            continue
+
+        api_url = f"{wp_host}/wp-json/f3-data/v1/workout-slug-date/{slug}/{workout_date}"
+        
+        try:
+            response = requests.get(api_url)
+            response.raise_for_status()
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data and data.get('author_name') and data.get('html_content'):
+                    updates_to_apply.append({
+                        'workout_id': workout_id,
+                        'author_name': data['author_name'],
+                        'html_content': data['html_content']
+                    })
+                    click.echo(f"Successfully fetched data for WORKOUT_ID {workout_id}")
+                else:
+                    not_found_records.append(record)
+                    click.echo(f"No data returned from API for WORKOUT_ID {workout_id}")
+            else:
+                not_found_records.append(record)
+                click.echo(f"API returned status {response.status_code} for WORKOUT_ID {workout_id}")
+
+        except requests.exceptions.RequestException as e:
+            error_records.append({'record': record, 'error': str(e)})
+            click.echo(f"Error fetching data for WORKOUT_ID {workout_id}: {e}")
+
+        time.sleep(1)
+
+    # Step 3: Update database with fetched data
+    if updates_to_apply:
+        click.echo(f"Step 3: Applying {len(updates_to_apply)} updates to the database...")
+        try:
+            db_connection = mysql.connector.connect(
+                host=db_host, user=db_user, password=db_password, database=db_name
+            )
+            cursor = db_connection.cursor()
+            
+            for update in updates_to_apply:
+                update_author(cursor, update['workout_id'], update['author_name'])
+                insert_html_content(cursor, update['workout_id'], update['html_content'])
+            
+            db_connection.commit()
+            click.echo("Database updates committed successfully.")
+
+        except mysql.connector.Error as err:
+            click.echo(f"Database update error: {err}", err=True)
+            db_connection.rollback()
+        finally:
+            if 'db_connection' in locals() and db_connection.is_connected():
+                cursor.close()
+                db_connection.close()
+                click.echo("Database connection closed.")
+
+    # Save error/not found records
+    save_offline(error_records, 'error_records.txt')
+    save_offline(not_found_records, 'not_found_records.txt')
+
+    click.echo("Migration finished.")
+
 
 def update_author(cursor, workout_id, author_name):
     """Updates the author for a given workout."""
